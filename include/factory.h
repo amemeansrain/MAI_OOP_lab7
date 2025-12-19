@@ -1,11 +1,12 @@
 #ifndef FACTORY_H
 #define FACTORY_H
 
-#include "npc.h"
 #include <memory>
 #include <sstream>
-#include <random>
 #include <string>
+
+// Forward declaration
+class NPC;
 
 // Factory для создания NPC
 class NPCFactory {

@@ -2,6 +2,7 @@
 #include "../include/visitor.h"
 #include <cmath>
 #include <random>
+#include <iostream>
 
 // Реализация базового класса NPC
 NPC::NPC(double x, double y, const std::string& name, int moveDist, int killDist) 
@@ -35,21 +36,26 @@ Dragon::Dragon(double x, double y, const std::string& name)
 
 std::string Dragon::getType() const { return "Dragon"; }
 
-void Dragon::accept(Visitor& visitor) {}
+void Dragon::accept(Visitor& visitor) {
+    (void)visitor; // Подавление предупреждения
+}
 
 bool Dragon::canAttack(NPC* other) {
-    // Дракон может атаковать быков
-    return dynamic_cast<Bull*>(other) != nullptr;
+    // Дракон может атаковать только быков
+    if (auto bull = dynamic_cast<Bull*>(other)) {
+        return true;
+    }
+    return false;
 }
 
 int Dragon::rollAttack(std::mt19937& gen) {
     std::uniform_int_distribution<> dist(1, 6);
-    return dist(gen); // Сила атаки от 1 до 6
+    return dist(gen);
 }
 
 int Dragon::rollDefense(std::mt19937& gen) {
     std::uniform_int_distribution<> dist(1, 6);
-    return dist(gen); // Сила защиты от 1 до 6
+    return dist(gen);
 }
 
 // Реализация Bull
@@ -58,11 +64,16 @@ Bull::Bull(double x, double y, const std::string& name)
 
 std::string Bull::getType() const { return "Bull"; }
 
-void Bull::accept(Visitor& visitor) {}
+void Bull::accept(Visitor& visitor) {
+    (void)visitor;
+}
 
 bool Bull::canAttack(NPC* other) {
-    // Бык может атаковать жаб
-    return dynamic_cast<Toad*>(other) != nullptr;
+    // Бык может атаковать только жаб
+    if (auto toad = dynamic_cast<Toad*>(other)) {
+        return true;
+    }
+    return false;
 }
 
 int Bull::rollAttack(std::mt19937& gen) {
@@ -81,10 +92,13 @@ Toad::Toad(double x, double y, const std::string& name)
 
 std::string Toad::getType() const { return "Toad"; }
 
-void Toad::accept(Visitor& visitor) {}
+void Toad::accept(Visitor& visitor) {
+    (void)visitor;
+}
 
 bool Toad::canAttack(NPC* other) {
-    // Жабы никого не могут атаковать (спасаются как могут)
+    // Жабы никого не могут атаковать
+    (void)other;
     return false;
 }
 

@@ -1,11 +1,15 @@
-#include "dungeon.h"
+#include "../include/dungeon.h"
+#include "../include/factory.h"
 #include <iostream>
 #include <sstream>
 #include <chrono>
 #include <thread>
 #include <iomanip>
+#include <algorithm>
 
-Dungeon::Dungeon() : running(false), fightCount(0) {}
+Dungeon::Dungeon() : running(false), fightCount(0) {
+    npcs.reserve(100);
+}
 
 Dungeon::~Dungeon() {
     stopGame();
@@ -13,7 +17,9 @@ Dungeon::~Dungeon() {
 
 void Dungeon::addNPC(std::shared_ptr<NPC> npc) {
     std::unique_lock lock(npcsMutex);
-    npcs.push_back(npc);
+    if (npc->getX() >= 0 && npc->getX() <= 100 && npc->getY() >= 0 && npc->getY() <= 100) {
+        npcs.push_back(npc);
+    }
 }
 
 void Dungeon::addObserver(std::shared_ptr<Observer> observer) {
@@ -22,23 +28,28 @@ void Dungeon::addObserver(std::shared_ptr<Observer> observer) {
 
 void Dungeon::printNPCs() const {
     std::shared_lock lock(npcsMutex);
-    std::cout << "Список NPC в подземелье:\n";
+    std::cout << "\n=== СПИСОК ВЫЖИВШИХ NPC ===\n";
+    int aliveCount = 0;
     for (const auto& npc : npcs) {
         if (npc->isAlive()) {
-            std::cout << "Тип: " << npc->getType() 
-                      << ", Имя: " << npc->getName() 
-                      << ", Координаты: (" << npc->getX() << ", " << npc->getY() << ")"
-                      << ", Жив: " << (npc->isAlive() ? "Да" : "Нет") << "\n";
+            std::cout << "Тип: " << std::setw(8) << std::left << npc->getType() 
+                      << " Имя: " << std::setw(15) << std::left << npc->getName() 
+                      << " Координаты: (" << std::setw(3) << (int)npc->getX() 
+                      << ", " << std::setw(3) << (int)npc->getY() << ")\n";
+            aliveCount++;
         }
     }
+    std::cout << "Всего выживших: " << aliveCount << "\n";
 }
 
 void Dungeon::saveToFile(const std::string& filename) const {
     std::shared_lock lock(npcsMutex);
     std::ofstream file(filename);
     for (const auto& npc : npcs) {
-        npc->save(file);
-        file << "\n";
+        if (npc->isAlive()) {
+            npc->save(file);
+            file << "\n";
+        }
     }
 }
 
@@ -74,51 +85,13 @@ const std::vector<std::shared_ptr<NPC>>& Dungeon::getNPCs() const {
     return npcs;
 }
 
-void Dungeon::movementWorker() {
-    std::mt19937 gen(rd());
-    
-    while (running) {
-        {
-            std::shared_lock lock(npcsMutex);
-            
-            for (size_t i = 0; i < npcs.size() && running; ++i) {
-                if (!npcs[i]->isAlive()) continue;
-                
-                // Двигаем NPC
-                auto oldX = npcs[i]->getX();
-                auto oldY = npcs[i]->getY();
-                npcs[i]->move(gen);
-                
-                // Уведомляем наблюдателей о движении
-                for (auto& observer : observers) {
-                    observer->onMove(npcs[i]->getName(), npcs[i]->getX(), npcs[i]->getY());
-                }
-                
-                // Проверяем возможность боя с другими NPC
-                for (size_t j = 0; j < npcs.size(); ++j) {
-                    if (i == j || !npcs[j]->isAlive()) continue;
-                    
-                    double distance = npcs[i]->distanceTo(*npcs[j]);
-                    if (distance <= npcs[i]->getKillDistance()) {
-                        // Создаем задачу для потока боев
-                        std::lock_guard<std::mutex> fightLock(fightQueueMutex);
-                        fightQueue.push({npcs[i], npcs[j]});
-                        fightCV.notify_one();
-                    }
-                }
-            }
-        }
-        
-        // Пауза между движениями
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-}
-
 void Dungeon::processFight(FightTask& task) {
-    auto& attacker = task.attacker;
-    auto& defender = task.defender;
+    auto attacker = task.attacker;
+    auto defender = task.defender;
     
-    if (!attacker->isAlive() || !defender->isAlive()) return;
+    if (!attacker || !defender || !attacker->isAlive() || !defender->isAlive()) {
+        return;
+    }
     
     // Проверяем, может ли атакующий атаковать защитника
     if (attacker->canAttack(defender.get())) {
@@ -126,6 +99,11 @@ void Dungeon::processFight(FightTask& task) {
         
         int attackPower = attacker->rollAttack(gen);
         int defensePower = defender->rollDefense(gen);
+        
+        // Отладочный вывод для проверки правил
+        std::cout << "[АТАКА] " << attacker->getName() << " (" << attacker->getType() 
+                  << ") атакует " << defender->getName() << " (" << defender->getType() 
+                  << "): атака=" << attackPower << ", защита=" << defensePower << std::endl;
         
         if (attackPower > defensePower) {
             // Убийство
@@ -147,23 +125,75 @@ void Dungeon::processFight(FightTask& task) {
     }
 }
 
+void Dungeon::movementWorker() {
+    std::mt19937 gen(rd());
+    
+    while (running) {
+        // Делаем паузу между движениями
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        
+        {
+            std::shared_lock lock(npcsMutex);
+            if (npcs.empty() || !running) continue;
+            
+            // Создаем копию индексов живых NPC
+            std::vector<size_t> aliveIndices;
+            for (size_t i = 0; i < npcs.size(); ++i) {
+                if (npcs[i]->isAlive()) {
+                    aliveIndices.push_back(i);
+                }
+            }
+            
+            // Перемешиваем индексы для случайного порядка движения
+            std::shuffle(aliveIndices.begin(), aliveIndices.end(), gen);
+            
+            for (size_t idx : aliveIndices) {
+                if (!running) break;
+                
+                // Двигаем NPC
+                npcs[idx]->move(gen);
+                
+                // Проверяем возможность боя с другими NPC
+                // Проверяем только часть NPC чтобы не перегружать
+                for (size_t j = 0; j < std::min(npcs.size(), (size_t)10); ++j) {
+                    if (idx == j || !npcs[j]->isAlive()) continue;
+                    
+                    double distance = npcs[idx]->distanceTo(*npcs[j]);
+                    if (distance <= npcs[idx]->getKillDistance()) {
+                        // Создаем задачу для потока боев
+                        std::lock_guard<std::mutex> fightLock(fightQueueMutex);
+                        fightQueue.push({npcs[idx], npcs[j]});
+                        fightCV.notify_one();
+                    }
+                }
+            }
+        }
+    }
+}
+
 void Dungeon::fightWorker() {
     while (running) {
-        std::unique_lock<std::mutex> lock(fightQueueMutex);
+        FightTask task;
+        bool hasTask = false;
         
-        // Ждем задач или остановки
-        fightCV.wait(lock, [this]() { 
-            return !fightQueue.empty() || !running; 
-        });
-        
-        if (!running) break;
-        
-        // Берем задачу из очереди
-        if (!fightQueue.empty()) {
-            FightTask task = fightQueue.front();
-            fightQueue.pop();
-            lock.unlock();
+        {
+            std::unique_lock<std::mutex> lock(fightQueueMutex);
             
+            // Ждем задачи или остановки с таймаутом
+            if (fightCV.wait_for(lock, std::chrono::milliseconds(100), 
+                [this]() { return !fightQueue.empty() || !running; })) {
+                
+                if (!running) break;
+                
+                if (!fightQueue.empty()) {
+                    task = fightQueue.front();
+                    fightQueue.pop();
+                    hasTask = true;
+                }
+            }
+        }
+        
+        if (hasTask) {
             processFight(task);
         }
     }
@@ -171,10 +201,12 @@ void Dungeon::fightWorker() {
 
 void Dungeon::printMap() {
     const int MAP_SIZE = 100;
-    const int CELL_SIZE = 10; // Каждая клетка = 10x10 единиц
+    const int CELL_SIZE = 10;
     
     std::vector<std::vector<std::string>> map(MAP_SIZE/CELL_SIZE, 
                                              std::vector<std::string>(MAP_SIZE/CELL_SIZE, "."));
+    
+    int dragonCount = 0, bullCount = 0, toadCount = 0;
     
     {
         std::shared_lock lock(npcsMutex);
@@ -186,14 +218,22 @@ void Dungeon::printMap() {
                 
                 if (x >= 0 && x < MAP_SIZE/CELL_SIZE && y >= 0 && y < MAP_SIZE/CELL_SIZE) {
                     map[y][x] = npc->getTypeSymbol();
+                    
+                    if (npc->getType() == "Dragon") dragonCount++;
+                    else if (npc->getType() == "Bull") bullCount++;
+                    else if (npc->getType() == "Toad") toadCount++;
                 }
             }
         }
     }
     
-    std::lock_guard<std::mutex> coutLock(std::mutex()); // Блокируем cout
-    std::cout << "\n=== КАРТА ПОДЗЕМЕЛЬЯ ===\n";
-    std::cout << "Легенда: D - Дракон, B - Бык, T - Жаба, . - пусто\n";
+    // Блокируем cout для чистого вывода
+    static std::mutex coutMutex;
+    std::lock_guard<std::mutex> coutLock(coutMutex);
+    
+    std::cout << "\n=== КАРТА ПОДЗЕМЕЛЬЯ ===" << std::endl;
+    std::cout << "Легенда: D - Дракон, B - Бык, T - Жаба, . - пусто" << std::endl;
+    std::cout << "Драконы: " << dragonCount << ", Быки: " << bullCount << ", Жабы: " << toadCount << std::endl;
     
     for (int y = 0; y < MAP_SIZE/CELL_SIZE; ++y) {
         for (int x = 0; x < MAP_SIZE/CELL_SIZE; ++x) {
@@ -202,13 +242,14 @@ void Dungeon::printMap() {
         std::cout << std::endl;
     }
     
-    std::cout << "Живых NPC: " << getAliveCount() 
-              << ", Всего NPC: " << getNPCCount()
+    std::cout << "Всего живых: " << getAliveCount() 
+              << " из " << getNPCCount()
               << ", Боев проведено: " << fightCount.load() << std::endl;
 }
 
 void Dungeon::mainWorker() {
     auto startTime = std::chrono::steady_clock::now();
+    int lastMapTime = -2; // Чтобы первая карта отобразилась сразу
     
     while (running) {
         auto currentTime = std::chrono::steady_clock::now();
@@ -219,15 +260,20 @@ void Dungeon::mainWorker() {
             break;
         }
         
-        // Печатаем карту раз в секунду
-        printMap();
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        // Печатаем карту раз в 3 секунды
+        if (elapsed.count() / 3 != lastMapTime) {
+            lastMapTime = elapsed.count() / 3;
+            printMap();
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
     // Финальный вывод
-    std::cout << "\n=== ИГРА ОКОНЧЕНА (прошло 30 секунд) ===\n";
-    std::cout << "ВЫЖИВШИЕ:\n";
-    printNPCs();
+    if (running) {
+        std::cout << "\n=== ИГРА ОКОНЧЕНА (прошло 30 секунд) ===" << std::endl;
+        printNPCs();
+    }
 }
 
 void Dungeon::startGame() {
@@ -239,15 +285,18 @@ void Dungeon::startGame() {
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> posDist(0, 100);
     
+    std::cout << "Создаю NPC..." << std::endl;
     for (int i = 0; i < 50; ++i) {
         double x = posDist(gen);
         double y = posDist(gen);
         auto npc = NPCFactory::createRandomNPC(x, y);
-        addNPC(npc);
+        if (npc) {
+            addNPC(npc);
+        }
     }
     
-    std::cout << "Создано 50 NPC. Начинаем игру!\n";
-    std::cout << "Игра продлится 30 секунд...\n";
+    std::cout << "Создано " << getNPCCount() << " NPC. Начинаем игру!" << std::endl;
+    std::cout << "Игра продлится 30 секунд..." << std::endl;
     
     // Запускаем потоки
     movementThread = std::thread(&Dungeon::movementWorker, this);
@@ -263,8 +312,22 @@ void Dungeon::stopGame() {
     // Оповещаем все потоки
     fightCV.notify_all();
     
-    // Ждем завершения потоков
-    if (movementThread.joinable()) movementThread.join();
-    if (fightThread.joinable()) fightThread.join();
-    if (mainThread.joinable()) mainThread.join();
+    // Ждем завершения потоков с таймаутом
+    if (movementThread.joinable()) {
+        if (movementThread.get_id() != std::this_thread::get_id()) {
+            movementThread.join();
+        }
+    }
+    
+    if (fightThread.joinable()) {
+        if (fightThread.get_id() != std::this_thread::get_id()) {
+            fightThread.join();
+        }
+    }
+    
+    if (mainThread.joinable()) {
+        if (mainThread.get_id() != std::this_thread::get_id()) {
+            mainThread.join();
+        }
+    }
 }

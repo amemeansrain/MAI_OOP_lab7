@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <queue>
 #include <functional>
+#include <thread>
 
 // Структура для задания боя
 struct FightTask {
